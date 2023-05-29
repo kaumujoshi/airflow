@@ -1,0 +1,122 @@
+---
+version: '3.4'
+
+x-common:
+  &common
+  image: apache/airflow:2.3.0
+  user: "${AIRFLOW_UID}:0"
+  env_file: 
+    - .env
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - /var/run/docker.sock:/var/run/docker.sock
+    - ./services/backend/src:/opt/airflow/dags
+
+x-depends-on:
+  &depends-on
+  depends_on:
+    postgres:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+
+services:
+
+  backend:
+    build: ./services/backend
+    ports:
+      - 5000:5000
+    environment:
+      - DATABASE_URL=postgres://template:template@db:5432/template_db
+    volumes:
+      - ./services/backend:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: uvicorn src.main:app --host 0.0.0.0 --port 5000 --workers 2
+    depends_on:
+      - db
+
+  db:
+    image: postgres:13
+    container_name: test_db_3
+    restart: always
+    expose:
+      - 5432
+    environment:
+      - POSTGRES_USER=template
+      - POSTGRES_PASSWORD=template
+      - POSTGRES_DB=template_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+      - ./sample_data:/sample_data
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin2_container
+    restart: always
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: dna@europe.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
+      interval: 5s
+      retries: 5
+    restart: always
+
+  scheduler:
+      <<: [*common, *depends-on]
+      container_name: airflow-scheduler_2
+      command: scheduler
+      restart: on-failure
+      ports:
+        - "8793:8793"
+      depends_on:
+      - db
+
+  webserver:
+      <<: [*common, *depends-on]
+      container_name: airflow-webserver_2
+      restart: always
+      command: webserver
+      ports:
+        - "8080:8080"
+      healthcheck:
+        test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+        interval: 30s
+        timeout: 30s
+        retries: 5
+      depends_on:
+      - db
+    
+  airflow-init:
+      <<: *common
+      container_name: airflow-init_2
+      entrypoint: /bin/bash
+      command:
+        - -c
+        - |
+          mkdir -p /sources/logs /sources/dags /sources/plugins
+          chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+          exec /entrypoint airflow version
+      depends_on:
+      - db
+
+volumes:
+  postgres_data:
+  pgadmin-data:
+  postgres-db-volume:
